@@ -1,0 +1,12 @@
+numpy<2
+pandas
+requests
+scikit-learn
+scipy
+setuptools<81
+pytest
+pytdc
+tqdm
+rdkit==2022.9.5
+torch
+transformers

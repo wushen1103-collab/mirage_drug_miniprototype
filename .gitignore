@@ -1,0 +1,47 @@
+# Python/cache
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+
+# Local environments/bootstrap
+.venv/
+venv/
+env/
+.bootstrap/
+
+# Generated experiment artifacts
+outputs/
+logs/
+wandb/
+data_cache/
+vendor/
+
+# Large model/checkpoint/data files
+*.pt
+*.pth
+*.pkl
+*.pickle
+*.safetensors
+*.ckpt
+*.bin
+*.npz
+*.npy
+*.parquet
+*.h5
+*.hdf5
+
+# Temporary and backup files
+*.bak
+*.bak_*
+*.tmp
+*.log
+.DS_Store
+
+# Local secrets/configuration
+.env
+.env.*
+*.secret

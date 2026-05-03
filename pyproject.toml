@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mirage-drug-miniprototype"
+version = "0.1.0"
+description = "Conflict-aware multimodal evidence fusion prototype for drug-target affinity prediction."
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [
+  {name = "MIRAGE-DTA authors"}
+]
+dependencies = [
+  "numpy<2",
+  "pandas",
+  "requests",
+  "scikit-learn",
+  "scipy",
+  "setuptools<81",
+  "pytdc",
+  "tqdm",
+  "rdkit==2022.9.5",
+  "torch",
+  "transformers",
+]
+
+[project.optional-dependencies]
+test = ["pytest"]
+external = ["torch-geometric"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
