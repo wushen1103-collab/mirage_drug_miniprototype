@@ -4,6 +4,19 @@ This repository contains the code used to prototype the MIRAGE-DTA study:
 conflict-aware multimodal information fusion for drug-target affinity prediction
 under missing modalities, cold-start entities, and distribution shifts.
 
+## Associated manuscript
+
+This repository accompanies the manuscript:
+
+**Conflict-aware Evidence Arbitration for Multimodal Information Fusion under
+Missing Modalities and Distribution Shifts: A Drug-Target Affinity Study**
+
+Authors: Shenkuang Wu, Jing Zhang, Lianming Zhang, and Pingping Dong.
+
+The code is released to support reproduction of the implemented models,
+benchmark construction procedures, threshold-sensitivity analyses,
+retrieval-shortcut audits, and evaluation summaries reported in the manuscript.
+
 The repository is intentionally code-focused. Large generated artifacts are not
 tracked here: cached datasets, model checkpoints, logs, external dependency
 bundles, result tables, and plotting/LaTeX outputs are excluded from git.
@@ -86,3 +99,11 @@ outside this repository. This git repo is meant to provide the executable
 research code: benchmark construction, training/evaluation, external-baseline
 adapters, and claim-level audit scripts. Seed-level outputs can be released as a
 separate supplementary artifact.
+
+## Data availability
+
+The raw datasets used by the study are publicly available from BindingDB, DAVIS,
+KIBA, ChEMBL, and Therapeutics Data Commons. This repository provides the scripts
+needed to reconstruct the processed benchmarks and evaluation summaries from
+those public resources. Large intermediate outputs, downloaded caches, trained
+checkpoints, and plotting/LaTeX artifacts are intentionally not tracked in git.
