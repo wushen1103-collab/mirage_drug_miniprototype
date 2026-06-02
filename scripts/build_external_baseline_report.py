@@ -14,7 +14,7 @@ METRIC_COLUMNS = ["auroc", "auprc", "rmse", "pearson", "spearman", "ci"]
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--outputs-root", default="outputs")
-    parser.add_argument("--output-dir", default="outputs/reports_20260419/external_baselines")
+    parser.add_argument("--output-dir", default="outputs/reports/external_baselines")
     return parser.parse_args()
 
 

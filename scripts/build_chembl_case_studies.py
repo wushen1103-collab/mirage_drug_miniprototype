@@ -18,8 +18,8 @@ PKD_ACTIVE_THRESHOLD = 6.0
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--outputs-root", default="outputs")
-    parser.add_argument("--benchmark-frame", default="outputs/reports_20260419/chembl_descriptives/benchmark_frame.csv")
-    parser.add_argument("--output-dir", default="outputs/reports_20260419/chembl_case_studies")
+    parser.add_argument("--benchmark-frame", default="outputs/reports/chembl_descriptives/benchmark_frame.csv")
+    parser.add_argument("--output-dir", default="outputs/reports/chembl_case_studies")
     parser.add_argument("--splits", nargs="*", default=DEFAULT_SPLITS)
     parser.add_argument("--frameworks", nargs="*", default=DEFAULT_FRAMEWORKS)
     parser.add_argument("--seeds", nargs="*", type=int, default=DEFAULT_SEEDS)

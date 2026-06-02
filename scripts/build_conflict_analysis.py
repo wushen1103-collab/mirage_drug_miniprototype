@@ -34,7 +34,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--outputs-root", default="outputs")
     parser.add_argument("--patterns", nargs="*", default=["tdc_*_vpred"])
     parser.add_argument("--run-dirs", nargs="*", default=[])
-    parser.add_argument("--output-dir", default="outputs/reports_20260419/conflict_analysis")
+    parser.add_argument("--output-dir", default="outputs/reports/conflict_analysis")
     parser.add_argument("--current-model", default=DEFAULT_CURRENT_MODEL)
     parser.add_argument("--retrieval-model", default=DEFAULT_RETRIEVAL_MODEL)
     parser.add_argument("--fusion-models", nargs="*", default=DEFAULT_FUSION_MODELS)

@@ -34,7 +34,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--patterns", nargs="*", default=[])
     parser.add_argument("--run-dirs", nargs="*", default=[])
     parser.add_argument("--n-bootstrap", type=int, default=1000)
-    parser.add_argument("--seed", type=int, default=20260502)
+    parser.add_argument("--seed", type=int, default=42)
     return parser.parse_args()
 
 
