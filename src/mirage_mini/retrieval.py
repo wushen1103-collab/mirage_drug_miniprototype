@@ -85,7 +85,9 @@ def _cosine_topk_block(
         valid = block_positions >= 0
         if valid.any():
             rows = np.flatnonzero(valid)
-            scores[rows, block_positions[valid]] = -1.0
+            # Self entries must never be selected as neighbors.  Use -inf rather
+            # than a valid cosine value so summarization can discard only them.
+            scores[rows, block_positions[valid]] = -np.inf
     return _topk_from_scores(scores, k=k)
 
 
@@ -181,12 +183,12 @@ class RetrievalAugmentor:
         self.y_train = y_train[self.reference_indices]
         return self
 
-    def _summarize(self, distances: np.ndarray, indices: np.ndarray, drop_self: bool) -> np.ndarray:
+    def _summarize(self, distances: np.ndarray, indices: np.ndarray) -> np.ndarray:
         outputs = []
         for row_dist, row_idx in zip(distances, indices):
-            if drop_self and len(row_idx) > 1:
-                row_dist = row_dist[1:]
-                row_idx = row_idx[1:]
+            valid = np.isfinite(row_dist)
+            row_dist = row_dist[valid]
+            row_idx = row_idx[valid]
             if len(row_idx) == 0:
                 outputs.append([0.0, 0.0, 0.0, 0.0, 0.0])
                 continue
@@ -210,14 +212,14 @@ class RetrievalAugmentor:
             x_query=x_train,
             x_train=self.x_train,
             train_norms=self.train_norms,
-            k=min(self.n_neighbors + 1, len(self.y_train)),
+            k=min(self.n_neighbors, len(self.y_train)),
             chunk_size=self.chunk_size,
             drop_self=True,
             query_reference_positions=self.query_reference_positions if x_train.shape[0] == self.train_size else None,
             n_jobs=self.n_jobs,
         )
         distances = 1.0 - sims
-        return self._summarize(distances, indices, drop_self=True)
+        return self._summarize(distances, indices)
 
     def transform(self, x_query: sparse.csr_matrix) -> np.ndarray:
         if self.x_train is None or self.train_norms is None:
@@ -232,7 +234,7 @@ class RetrievalAugmentor:
             n_jobs=self.n_jobs,
         )
         distances = 1.0 - sims
-        return self._summarize(distances, indices, drop_self=False)
+        return self._summarize(distances, indices)
 
 
 class RichRetrievalAugmentor:
@@ -285,14 +287,14 @@ class RichRetrievalAugmentor:
     def _zero_block(self, n_rows: int) -> np.ndarray:
         return np.zeros((n_rows, self.stats_dim), dtype=np.float32)
 
-    def _summarize(self, distances: np.ndarray, indices: np.ndarray, drop_self: bool) -> np.ndarray:
+    def _summarize(self, distances: np.ndarray, indices: np.ndarray) -> np.ndarray:
         if self.y_train is None:
             return self._zero_block(len(distances))
         outputs = []
         for row_dist, row_idx in zip(distances, indices):
-            if drop_self and len(row_idx) > 1:
-                row_dist = row_dist[1:]
-                row_idx = row_idx[1:]
+            valid = np.isfinite(row_dist)
+            row_dist = row_dist[valid]
+            row_idx = row_idx[valid]
             if len(row_idx) == 0:
                 outputs.append([0.0] * self.stats_dim)
                 continue
@@ -319,14 +321,14 @@ class RichRetrievalAugmentor:
             x_query=x_train,
             x_train=self.x_train,
             train_norms=self.train_norms,
-            k=min(self.n_neighbors + 1, len(self.y_train)),
+            k=min(self.n_neighbors, len(self.y_train)),
             chunk_size=self.chunk_size,
             drop_self=True,
             query_reference_positions=self.query_reference_positions if x_train.shape[0] == self.train_size else None,
             n_jobs=self.n_jobs,
         )
         distances = 1.0 - sims
-        return self._summarize(distances, indices, drop_self=True)
+        return self._summarize(distances, indices)
 
     def transform(self, x_query: sparse.csr_matrix) -> np.ndarray:
         if self.x_train is None or self.train_norms is None:
@@ -341,7 +343,7 @@ class RichRetrievalAugmentor:
             n_jobs=self.n_jobs,
         )
         distances = 1.0 - sims
-        return self._summarize(distances, indices, drop_self=False)
+        return self._summarize(distances, indices)
 
 
 @dataclass

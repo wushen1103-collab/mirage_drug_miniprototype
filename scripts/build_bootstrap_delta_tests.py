@@ -18,12 +18,16 @@ if str(SRC_ROOT) not in sys.path:
 from mirage_mini.metrics import expected_calibration_error, risk_at_coverage  # noqa: E402
 
 
-FIXED_MODEL = "hybrid_plus_pretrained_smiles_text"
+FIXED_MODEL = "mirage_full"
 BASELINE_MODELS = [
+    "mirage_w_o_gate",
+    "mirage_w_o_probe",
+    "mirage_w_o_anchor",
     "hybrid_blend_avg",
     "mask",
     "retrieval",
-    "hybrid_plus_pretrained_smiles_text_retrieval",
+    "historical_retrieval_evidence",
+    "hybrid_plus_pretrained_smiles_text",
 ]
 
 

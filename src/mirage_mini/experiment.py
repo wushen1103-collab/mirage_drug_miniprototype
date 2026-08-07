@@ -7,6 +7,7 @@ from typing import Dict
 import numpy as np
 import pandas as pd
 from scipy import sparse
+from sklearn.model_selection import StratifiedKFold
 
 from mirage_mini.data import (
     DatasetBundle,
@@ -23,9 +24,12 @@ from mirage_mini.features import MorganFingerprintFeaturizer, MultiModalFeaturiz
 from mirage_mini.metrics import evaluate_binary
 from mirage_mini.model import (
     append_dense_features,
+    build_reliability_features,
     blend_probabilities,
     build_gate_features,
+    fit_arbitration_gate,
     fit_gate_model,
+    fit_reliability_probe,
     select_best_candidate,
     select_blend_weight,
     train_classifier,
@@ -36,6 +40,126 @@ from mirage_mini.retrieval import MultiViewRetrievalAugmentor, RetrievalAugmento
 ROBUST_SEQUENCE_ANCHOR_ALPHA = 0.35
 ROBUST_PROBE_ANCHOR_ALPHA = 0.45
 RETRIEVAL_SEQUENCE_BRIDGE_ALPHA = 0.45
+
+
+def _fit_conflict_aware_arbitration(
+    *,
+    y_train: np.ndarray,
+    y_val: np.ndarray,
+    current_val: np.ndarray,
+    retrieval_val: np.ndarray,
+    current_test: np.ndarray,
+    retrieval_test: np.ndarray,
+    current_missing: np.ndarray,
+    retrieval_missing: np.ndarray,
+    val_stats: np.ndarray,
+    test_stats: np.ndarray,
+    missing_stats: np.ndarray,
+    val_masks: np.ndarray,
+    test_masks: np.ndarray,
+    missing_masks: np.ndarray,
+    seed: int = 42,
+) -> dict[str, np.ndarray | float]:
+    """Cross-fit gate decisions before training the reliability probe on them."""
+    y_val = np.asarray(y_val, dtype=int)
+    gate_features_val = build_gate_features(current_val, retrieval_val, val_stats, val_masks)
+    better_current = ((np.asarray(current_val) - y_val) ** 2 <= (np.asarray(retrieval_val) - y_val) ** 2).astype(int)
+    gamma_oof = np.full(len(y_val), 0.5, dtype=np.float32)
+    _, counts = np.unique(y_val, return_counts=True)
+    folds = min(3, int(counts.min())) if len(counts) == 2 else 0
+    if folds >= 2:
+        splitter = StratifiedKFold(n_splits=folds, shuffle=True, random_state=seed)
+        for train_idx, holdout_idx in splitter.split(gate_features_val, y_val):
+            fold_gate = fit_arbitration_gate(gate_features_val[train_idx], better_current[train_idx])
+            gamma_oof[holdout_idx] = fold_gate.predict_weight(gate_features_val[holdout_idx])
+    gated_oof = gamma_oof * np.asarray(current_val) + (1.0 - gamma_oof) * np.asarray(retrieval_val)
+    reliability_features_oof = build_reliability_features(
+        current_val,
+        retrieval_val,
+        gated_oof,
+        gamma_oof,
+        val_stats,
+        val_masks,
+    )
+    correctness = ((gated_oof >= 0.5).astype(int) == y_val).astype(int)
+    reliability_oof = np.full(len(y_val), float(np.mean(correctness)), dtype=np.float32)
+    if folds >= 2:
+        splitter = StratifiedKFold(n_splits=folds, shuffle=True, random_state=seed + 1)
+        for train_idx, holdout_idx in splitter.split(reliability_features_oof, y_val):
+            fold_probe = fit_reliability_probe(
+                reliability_features_oof[train_idx], correctness[train_idx]
+            )
+            reliability_oof[holdout_idx] = fold_probe.predict_reliability(
+                reliability_features_oof[holdout_idx]
+            )
+    reliability_probe = fit_reliability_probe(reliability_features_oof, correctness)
+    gate = fit_arbitration_gate(gate_features_val, better_current)
+    anchor = float(np.mean(np.asarray(y_train, dtype=float)))
+
+    # The anchor is a validation-calibrated shrinkage target, not an unconditional
+    # replacement for branch evidence. Cross-fitted validation predictions choose its
+    # strength before the held-out test split is evaluated.
+    anchor_strength_grid = np.linspace(0.0, 1.0, 21)
+    anchor_losses = []
+    for strength in anchor_strength_grid:
+        anchor_mix = (1.0 - strength) * gated_oof + strength * anchor
+        anchored_oof = reliability_oof * gated_oof + (1.0 - reliability_oof) * anchor_mix
+        anchor_losses.append(float(np.mean((anchored_oof - y_val) ** 2)))
+    anchor_strength = float(anchor_strength_grid[int(np.argmin(anchor_losses))])
+
+    def apply(
+        current: np.ndarray,
+        retrieval: np.ndarray,
+        stats: np.ndarray,
+        masks: np.ndarray,
+        gamma: np.ndarray | None = None,
+        reliability_override: np.ndarray | None = None,
+    ) -> dict[str, np.ndarray]:
+        if gamma is None:
+            features = build_gate_features(current, retrieval, stats, masks)
+            gamma = gate.predict_weight(features)
+        gated = gamma * np.asarray(current) + (1.0 - gamma) * np.asarray(retrieval)
+        reliability_features = build_reliability_features(current, retrieval, gated, gamma, stats, masks)
+        reliability = (
+            np.asarray(reliability_override, dtype=np.float32)
+            if reliability_override is not None
+            else reliability_probe.predict_reliability(reliability_features)
+        )
+        equal = 0.5 * np.asarray(current) + 0.5 * np.asarray(retrieval)
+        anchor_mix = (1.0 - anchor_strength) * gated + anchor_strength * anchor
+        equal_anchor_mix = (1.0 - anchor_strength) * equal + anchor_strength * anchor
+        no_gate = reliability * equal + (1.0 - reliability) * equal_anchor_mix
+        no_probe = 0.5 * gated + 0.5 * anchor_mix
+        no_anchor = gated
+        full = reliability * gated + (1.0 - reliability) * anchor_mix
+        return {
+            "full": np.asarray(full, dtype=np.float32),
+            "no_gate": np.asarray(no_gate, dtype=np.float32),
+            "no_probe": np.asarray(no_probe, dtype=np.float32),
+            "no_anchor": np.asarray(no_anchor, dtype=np.float32),
+            "gamma": np.asarray(gamma, dtype=np.float32),
+            "reliability": np.asarray(reliability, dtype=np.float32),
+            "gated": np.asarray(gated, dtype=np.float32),
+        }
+
+    val_output = apply(
+        current_val,
+        retrieval_val,
+        val_stats,
+        val_masks,
+        gamma=gamma_oof,
+        reliability_override=reliability_oof,
+    )
+    test_output = apply(current_test, retrieval_test, test_stats, test_masks)
+    missing_output = apply(current_missing, retrieval_missing, missing_stats, missing_masks)
+    return {
+        "val": val_output,
+        "test": test_output,
+        "missing": missing_output,
+        "anchor": anchor,
+        "anchor_strength": anchor_strength,
+        "probe_oof_accuracy": float(np.mean(correctness)),
+    }
 
 
 def load_bundle(dataset: str, cache_dir: Path, sample_size: int, seed: int) -> DatasetBundle:
@@ -147,6 +271,13 @@ def run_model_suite(
     multiview_val_prob = multiview_model.predict_proba(x_val_mv)[:, 1]
     multiview_test_prob = multiview_model.predict_proba(x_test_mv)[:, 1]
     multiview_missing_prob = multiview_model.predict_proba(x_test_missing_mv)[:, 1]
+
+    # This branch uses only statistics of training-memory neighbors. Keeping it
+    # separate from the current-feature classifier makes arbitration auditable.
+    retrieval_evidence_model = train_classifier(sparse.csr_matrix(train_mv_stats), y_train)
+    retrieval_evidence_val_prob = retrieval_evidence_model.predict_proba(sparse.csr_matrix(val_mv_stats))[:, 1]
+    retrieval_evidence_test_prob = retrieval_evidence_model.predict_proba(sparse.csr_matrix(test_mv_stats))[:, 1]
+    retrieval_evidence_missing_prob = retrieval_evidence_model.predict_proba(sparse.csr_matrix(missing_mv_stats))[:, 1]
 
     x_train_smiles = append_dense_features(x_train_mask.matrix, train_mv_stats[:, smiles_slice])
     x_val_smiles = append_dense_features(x_val_mask.matrix, val_mv_stats[:, smiles_slice])
@@ -293,6 +424,27 @@ def run_model_suite(
     interaction_probe_best_val_auprc = None
     interaction_probe_selected_baseline = None
     interaction_probe_text_field = None
+    mirage_full_val_prob = None
+    mirage_full_test_prob = None
+    mirage_full_missing_prob = None
+    mirage_no_gate_val_prob = None
+    mirage_no_gate_test_prob = None
+    mirage_no_gate_missing_prob = None
+    mirage_no_probe_val_prob = None
+    mirage_no_probe_test_prob = None
+    mirage_no_probe_missing_prob = None
+    mirage_no_anchor_val_prob = None
+    mirage_no_anchor_test_prob = None
+    mirage_no_anchor_missing_prob = None
+    mirage_gate_val = None
+    mirage_gate_test = None
+    mirage_gate_missing = None
+    mirage_reliability_val = None
+    mirage_reliability_test = None
+    mirage_reliability_missing = None
+    mirage_anchor_probability = None
+    mirage_anchor_strength = None
+    mirage_probe_oof_accuracy = None
 
     if smiles_embedder is not None:
         train_smiles_emb = smiles_embedder.transform(train_df["smiles"])
@@ -651,13 +803,10 @@ def run_model_suite(
                     batch_size=int(interaction_probe_config.get("batch_size", 64)),
                 )
 
-                interaction_probe_selected_baseline = select_best_candidate(
-                    y_val,
-                    {
-                        "hybrid_blend_avg": hybrid_blend_val_prob,
-                        "hybrid_plus_pretrained_smiles_text": hybrid_smiles_text_val_prob,
-                    },
-                )
+                # Keep the probe branch definition fixed across datasets and splits.
+                # Validation is used for ordinary early stopping and blend-weight tuning,
+                # not to choose a different current-evidence architecture per split.
+                interaction_probe_selected_baseline = "hybrid_plus_pretrained_smiles_text"
                 selected_baseline_probs = {
                     "hybrid_blend_avg": (
                         hybrid_blend_val_prob,
@@ -823,6 +972,45 @@ def run_model_suite(
             interaction_gate_blend_alpha,
         )
 
+    if mask_val_prob is not None:
+        arbitration = _fit_conflict_aware_arbitration(
+            y_train=y_train,
+            y_val=y_val,
+            current_val=mask_val_prob,
+            retrieval_val=retrieval_evidence_val_prob,
+            current_test=mask_test_prob,
+            retrieval_test=retrieval_evidence_test_prob,
+            current_missing=mask_missing_prob,
+            retrieval_missing=retrieval_evidence_missing_prob,
+            val_stats=val_mv_stats,
+            test_stats=test_mv_stats,
+            missing_stats=missing_mv_stats,
+            val_masks=x_val_mask.masks,
+            test_masks=x_test_mask.masks,
+            missing_masks=x_test_missing_mask.masks,
+        )
+        mirage_full_val_prob = arbitration["val"]["full"]
+        mirage_full_test_prob = arbitration["test"]["full"]
+        mirage_full_missing_prob = arbitration["missing"]["full"]
+        mirage_no_gate_val_prob = arbitration["val"]["no_gate"]
+        mirage_no_gate_test_prob = arbitration["test"]["no_gate"]
+        mirage_no_gate_missing_prob = arbitration["missing"]["no_gate"]
+        mirage_no_probe_val_prob = arbitration["val"]["no_probe"]
+        mirage_no_probe_test_prob = arbitration["test"]["no_probe"]
+        mirage_no_probe_missing_prob = arbitration["missing"]["no_probe"]
+        mirage_no_anchor_val_prob = arbitration["val"]["no_anchor"]
+        mirage_no_anchor_test_prob = arbitration["test"]["no_anchor"]
+        mirage_no_anchor_missing_prob = arbitration["missing"]["no_anchor"]
+        mirage_gate_val = arbitration["val"]["gamma"]
+        mirage_gate_test = arbitration["test"]["gamma"]
+        mirage_gate_missing = arbitration["missing"]["gamma"]
+        mirage_reliability_val = arbitration["val"]["reliability"]
+        mirage_reliability_test = arbitration["test"]["reliability"]
+        mirage_reliability_missing = arbitration["missing"]["reliability"]
+        mirage_anchor_probability = float(arbitration["anchor"])
+        mirage_anchor_strength = float(arbitration["anchor_strength"])
+        mirage_probe_oof_accuracy = float(arbitration["probe_oof_accuracy"])
+
     fullsuite_candidates = {
         "hybrid_blend_avg": (
             hybrid_blend_val_prob,
@@ -906,6 +1094,10 @@ def run_model_suite(
     ) = fullsuite_candidates[fullsuite_val_select_name]
 
     model_prob_triplets = {
+        "mirage_full": (mirage_full_val_prob, mirage_full_test_prob, mirage_full_missing_prob),
+        "mirage_w_o_gate": (mirage_no_gate_val_prob, mirage_no_gate_test_prob, mirage_no_gate_missing_prob),
+        "mirage_w_o_probe": (mirage_no_probe_val_prob, mirage_no_probe_test_prob, mirage_no_probe_missing_prob),
+        "mirage_w_o_anchor": (mirage_no_anchor_val_prob, mirage_no_anchor_test_prob, mirage_no_anchor_missing_prob),
         "no_mask": (no_mask_val_prob, no_mask_test_prob, no_mask_missing_prob),
         "mask": (mask_val_prob, mask_test_prob, mask_missing_prob),
         "retrieval": (retrieval_val_prob, retrieval_test_prob, retrieval_missing_prob),
@@ -915,6 +1107,11 @@ def run_model_suite(
         "hybrid_plus_morgan_bits": (hybrid_plus_val_prob, hybrid_plus_test_prob, hybrid_plus_missing_prob),
         "hybrid_blend_avg": (hybrid_blend_val_prob, hybrid_blend_test_prob, hybrid_blend_missing_prob),
         "multiview_retrieval": (multiview_val_prob, multiview_test_prob, multiview_missing_prob),
+        "historical_retrieval_evidence": (
+            retrieval_evidence_val_prob,
+            retrieval_evidence_test_prob,
+            retrieval_evidence_missing_prob,
+        ),
         "gated_retrieval": (gated_val_prob, gated_test_prob, gated_missing_prob),
         "pretrained_smiles_dense": (pretrained_dense_val_prob, pretrained_dense_test_prob, pretrained_dense_missing_prob),
         "pretrained_smiles_retrieval": (
@@ -1030,6 +1227,8 @@ def run_model_suite(
             "smiles": val_df["smiles"] if "smiles" in val_df.columns else "",
             "sequence": val_df["sequence"] if "sequence" in val_df.columns else "",
             "text": val_df["text"] if "text" in val_df.columns else "",
+            "mirage_gate_weight": mirage_gate_val,
+            "mirage_reliability": mirage_reliability_val,
             **{f"{name}_prob": payload[0] for name, payload in model_prob_triplets.items()},
         }
     )
@@ -1046,6 +1245,10 @@ def run_model_suite(
             "smiles": test_df["smiles"] if "smiles" in test_df.columns else "",
             "sequence": test_df["sequence"] if "sequence" in test_df.columns else "",
             "text": test_df["text"] if "text" in test_df.columns else "",
+            "mirage_gate_weight_clean": mirage_gate_test,
+            "mirage_gate_weight_missing": mirage_gate_missing,
+            "mirage_reliability_clean": mirage_reliability_test,
+            "mirage_reliability_missing": mirage_reliability_missing,
             **{f"{name}_prob_clean": payload[1] for name, payload in model_prob_triplets.items()},
             **{f"{name}_prob_missing": payload[2] for name, payload in model_prob_triplets.items()},
             "text_missing": stressed_test_df["text"].eq(""),
@@ -1099,6 +1302,11 @@ def run_model_suite(
             "test_clean": evaluate_binary(y_test, multiview_test_prob),
             "test_missing": evaluate_binary(y_test, multiview_missing_prob),
         },
+        "historical_retrieval_evidence": {
+            "val": evaluate_binary(y_val, retrieval_evidence_val_prob),
+            "test_clean": evaluate_binary(y_test, retrieval_evidence_test_prob),
+            "test_missing": evaluate_binary(y_test, retrieval_evidence_missing_prob),
+        },
         "gated_retrieval": {
             "val": evaluate_binary(y_val, gated_val_prob),
             "test_clean": evaluate_binary(y_test, gated_test_prob),
@@ -1111,6 +1319,35 @@ def run_model_suite(
             "selected_model": fullsuite_val_select_name,
         },
     }
+    if mirage_full_val_prob is not None:
+        models.update(
+            {
+                "mirage_full": {
+                    "val": evaluate_binary(y_val, mirage_full_val_prob),
+                    "test_clean": evaluate_binary(y_test, mirage_full_test_prob),
+                    "test_missing": evaluate_binary(y_test, mirage_full_missing_prob),
+                    "anchor_probability": mirage_anchor_probability,
+                    "anchor_strength": mirage_anchor_strength,
+                    "probe_oof_accuracy": mirage_probe_oof_accuracy,
+                    "definition": "mask-aware direct current branch, training-memory branch, cross-fitted arbitration gate, reliability probe, and validation-calibrated prevalence anchor",
+                },
+                "mirage_w_o_gate": {
+                    "val": evaluate_binary(y_val, mirage_no_gate_val_prob),
+                    "test_clean": evaluate_binary(y_test, mirage_no_gate_test_prob),
+                    "test_missing": evaluate_binary(y_test, mirage_no_gate_missing_prob),
+                },
+                "mirage_w_o_probe": {
+                    "val": evaluate_binary(y_val, mirage_no_probe_val_prob),
+                    "test_clean": evaluate_binary(y_test, mirage_no_probe_test_prob),
+                    "test_missing": evaluate_binary(y_test, mirage_no_probe_missing_prob),
+                },
+                "mirage_w_o_anchor": {
+                    "val": evaluate_binary(y_val, mirage_no_anchor_val_prob),
+                    "test_clean": evaluate_binary(y_test, mirage_no_anchor_test_prob),
+                    "test_missing": evaluate_binary(y_test, mirage_no_anchor_missing_prob),
+                },
+            }
+        )
     if smiles_embedder is not None:
         models.update(
             {

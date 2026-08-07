@@ -77,6 +77,95 @@ def fit_gate_model(x_train: np.ndarray, y_train: np.ndarray) -> GateModel:
     return GateModel(model=model)
 
 
+@dataclass
+class ArbitrationGate:
+    """Predicts the weight assigned to the current-evidence branch."""
+
+    model: LogisticRegression | None
+    fallback_weight: float = 0.5
+
+    def predict_weight(self, x: np.ndarray) -> np.ndarray:
+        if self.model is None:
+            return np.full(len(x), self.fallback_weight, dtype=np.float32)
+        return self.model.predict_proba(x)[:, 1].astype(np.float32)
+
+
+def fit_arbitration_gate(x_train: np.ndarray, current_is_better: np.ndarray) -> ArbitrationGate:
+    """Fit a gate to choose the lower squared-error evidence branch."""
+    target = np.asarray(current_is_better, dtype=int)
+    classes, counts = np.unique(target, return_counts=True)
+    if len(classes) < 2 or int(counts.min()) < 2 or len(target) < 6:
+        return ArbitrationGate(model=None, fallback_weight=float(np.mean(target)) if len(target) else 0.5)
+    model = LogisticRegression(
+        max_iter=300,
+        class_weight="balanced",
+        solver="liblinear",
+        C=0.5,
+    )
+    model.fit(np.asarray(x_train, dtype=np.float32), target)
+    return ArbitrationGate(model=model)
+
+
+@dataclass
+class ReliabilityProbe:
+    """Estimates whether an already-arbitrated probability will be correct."""
+
+    model: LogisticRegression | None
+    fallback_reliability: float
+
+    def predict_reliability(self, x: np.ndarray) -> np.ndarray:
+        if self.model is None:
+            return np.full(len(x), self.fallback_reliability, dtype=np.float32)
+        return self.model.predict_proba(x)[:, 1].astype(np.float32)
+
+
+def build_reliability_features(
+    current_prob: np.ndarray,
+    retrieval_prob: np.ndarray,
+    gated_prob: np.ndarray,
+    gate_weight: np.ndarray,
+    retrieval_stats: np.ndarray,
+    masks: np.ndarray,
+) -> np.ndarray:
+    current = np.asarray(current_prob, dtype=np.float32).reshape(-1, 1)
+    retrieval = np.asarray(retrieval_prob, dtype=np.float32).reshape(-1, 1)
+    gated = np.asarray(gated_prob, dtype=np.float32).reshape(-1, 1)
+    weight = np.asarray(gate_weight, dtype=np.float32).reshape(-1, 1)
+    disagreement = np.abs(current - retrieval)
+    confidence = np.abs(gated - 0.5) * 2.0
+    missing_count = (1.0 - np.asarray(masks, dtype=np.float32)).sum(axis=1, keepdims=True)
+    return np.hstack(
+        [
+            current,
+            retrieval,
+            gated,
+            weight,
+            disagreement,
+            confidence,
+            np.asarray(retrieval_stats, dtype=np.float32),
+            np.asarray(masks, dtype=np.float32),
+            missing_count,
+        ]
+    ).astype(np.float32)
+
+
+def fit_reliability_probe(x_train: np.ndarray, correctness: np.ndarray) -> ReliabilityProbe:
+    """Fit a calibrated low-capacity reliability model on cross-fitted decisions."""
+    target = np.asarray(correctness, dtype=int)
+    default = float(np.mean(target)) if len(target) else 0.5
+    classes, counts = np.unique(target, return_counts=True)
+    if len(classes) < 2 or int(counts.min()) < 2 or len(target) < 6:
+        return ReliabilityProbe(model=None, fallback_reliability=default)
+    model = LogisticRegression(
+        max_iter=300,
+        class_weight="balanced",
+        solver="liblinear",
+        C=0.5,
+    )
+    model.fit(np.asarray(x_train, dtype=np.float32), target)
+    return ReliabilityProbe(model=model, fallback_reliability=default)
+
+
 def blend_probabilities(prob_a: np.ndarray, prob_b: np.ndarray, alpha: float) -> np.ndarray:
     alpha = float(np.clip(alpha, 0.0, 1.0))
     return ((1.0 - alpha) * np.asarray(prob_a) + alpha * np.asarray(prob_b)).astype(np.float32)

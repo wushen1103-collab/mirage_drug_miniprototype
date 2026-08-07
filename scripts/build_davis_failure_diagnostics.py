@@ -15,7 +15,7 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 
-FIXED_MODEL = "hybrid_plus_pretrained_smiles_text"
+DEFAULT_FIXED_MODEL = "mirage_full"
 SIMPLE_FALLBACKS = [
     "mask",
     "hybrid_blend_avg",
@@ -31,6 +31,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--outputs-root", default="outputs")
     parser.add_argument("--output-dir", default="outputs/submission_hardening/davis_failure_diagnostics")
     parser.add_argument("--patterns", nargs="*", default=["tdc_davis_*_vpred"])
+    parser.add_argument("--fixed-model", default=DEFAULT_FIXED_MODEL)
     return parser.parse_args()
 
 
@@ -119,7 +120,7 @@ def main() -> None:
     if not metrics_df.empty:
         for key, group in metrics_df.groupby(["split_mode", "metric_split", "seed"], dropna=False):
             split_mode, metric_split, seed = key
-            fixed = group[group["model"] == FIXED_MODEL]
+            fixed = group[group["model"] == args.fixed_model]
             if fixed.empty:
                 continue
             fixed_row = fixed.iloc[0]
@@ -134,7 +135,7 @@ def main() -> None:
                     "split_mode": split_mode,
                     "metric_split": metric_split,
                     "seed": seed,
-                    "fixed_model": FIXED_MODEL,
+                    "fixed_model": args.fixed_model,
                     "fixed_auprc": fixed_row["auprc"],
                     "fixed_auroc": fixed_row["auroc"],
                     "fixed_ece": fixed_row["ece"],
@@ -185,6 +186,7 @@ def main() -> None:
         "runs_analyzed": int(metrics_df["run_dir"].nunique()) if not metrics_df.empty else 0,
         "metric_rows": int(len(metrics_df)),
         "diagnostic_rows": int(len(diag_df)),
+        "fixed_model": args.fixed_model,
         "output_dir": str(output_dir),
     }
     (output_dir / "report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
@@ -193,4 +195,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
